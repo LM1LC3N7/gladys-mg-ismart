@@ -16,8 +16,8 @@ its only runtime dependency. It started from the official JavaScript template.
 ```bash
 npm install
 npm test                                  # node --test, the built-in runner
-node --test test/devices.test.js          # one file
-node --test --test-name-pattern "plug"    # tests whose name matches
+node --test test/app.test.js              # one file
+node --test --test-name-pattern "lock"    # tests whose name matches
 npm run lint                              # ESLint
 npm run format:check                      # Prettier, as the CI runs it
 npm run format                            # Prettier, fix in place
@@ -32,12 +32,15 @@ pushing.
 
 ```
 index.js                          SDK wiring only: handlers registered before connect()
-src/devices/index.js              registry of the device blueprints + dispatch helpers
-src/devices/<type>.js             one device type per file (buildDevice, onPoll, onSetValue...)
-src/scenes.js                     scene action handlers (manifest `scene_actions`)
-src/widgets.js                    dashboard widget handlers (manifest `widgets`)
-src/config.js                     DEFAULT_CONFIG (mirrors the manifest defaults) + normalization
-src/weather.js                    example driver (Open-Meteo)
+src/handlers.js                   the SDK handlers -> MgApp (shared with the tests)
+src/app.js                        MgApp: polling, stops and pauses, devices, buttons, commands
+src/client.js                     SAIC sign-in, token, event-id polling, reads, command bodies
+src/crypto.js                     the gateway's body encoding and verification string
+src/saic.js                       the only HTTP access, SaicError (codes only, no secret)
+src/model.js                      answers -> values, ranges checked (pure)
+src/devices.js                    the device of a car and its states (pure)
+src/publisher.js, src/store.js    states within 300/min; /data/mg-ismart-state.json
+src/config.js                     DEFAULTS (mirrors the manifest defaults) + normalization
 gladys-assistant-integration.json manifest: name, config_schema, actions, image...
 docs/en.md, docs/fr.md            user documentation, re-hosted by Gladys (mandatory)
 test/                             node --test, against the SDK's fake Gladys (integration-sdk/testing)
@@ -74,3 +77,9 @@ test/                             node --test, against the SDK's fake Gladys (in
   manifest texts, and `docs/en.md` / `docs/fr.md`, kept in sync.
 - **Style.** Prettier formats, ESLint catches mistakes. Comments explain why,
   in English. Tests never touch the network.
+- **This integration.** Each status read wakes the car (12 V battery): never
+  read sooner than the interval, never in a loop. Commands are `button/push`
+  only, each behind an off-by-default option, decided on a fresh read, sent
+  once. Never log the password, the token, the VIN or the position; `/data`
+  keeps the token, never the password, the VIN or the position. See
+  `TODO.md` "Decisions".

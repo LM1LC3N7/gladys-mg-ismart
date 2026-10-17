@@ -1,45 +1,71 @@
 // -----------------------------------------------------------------------------
-// Integration configuration.
-//
-// The configuration is filled in by the user in Gladys, from the `config_schema`
-// declared in `gladys-assistant-integration.json`. The SDK fetches it for you
-// (`gladys.getConfig()`) and notifies you of every change through
-// `gladys.onConfigUpdated()`.
-//
-// This module only provides defaults and normalizes the received object, so the
-// rest of the code never has to deal with `undefined`.
+// The configuration of the manifest `config_schema`, normalized.
 // -----------------------------------------------------------------------------
 
-// Defaults: they MUST stay consistent with the `default` values declared in the
-// `config_schema` of the manifest.
-export const DEFAULT_CONFIG = {
-  latitude: 48.8566, // Paris
-  longitude: 2.3522,
-  unit: 'celsius', // 'celsius' | 'fahrenheit'
-  // Seconds between two reads of the polled sensors. Gladys polls at most once
-  // a minute: slower intervals are applied by skipping polls (see
-  // createPoller in src/devices/index.js).
-  poll_frequency: 300,
-  // Reserved key (NOT in config_schema): because the manifest declares both
-  // 'local' and 'cloud' in its `transports` field, Gladys shows a standard
-  // "Prefer the local connection" toggle and sends the user's choice here.
-  // Read-only for the integration; defaults to true.
-  GLADYS_PREFER_LOCAL: true,
+import { createHash } from 'node:crypto';
+import { TIMINGS } from './constants.js';
+
+/** Defaults, mirrored by the manifest (checked by test/manifest.test.js). */
+export const DEFAULTS = {
+  interval_minutes: TIMINGS.intervalDefault,
+  allow_lock: false,
+  allow_unlock: false,
+  allow_tailgate: false,
+  allow_climate: false,
+  allow_charging: false,
+  timezone: 'Europe/Paris',
+  language: 'fr',
 };
 
-/**
- * Merge the user config with the defaults.
- * @param {Record<string, unknown>} raw config returned by the SDK
- */
+export const LANGUAGES = ['fr', 'en'];
+
+/** A short hash of the e-mail: the account a session belongs to, without the e-mail itself. */
+export const accountKey = (email) =>
+  createHash('sha256').update(email.trim().toLowerCase()).digest('hex').slice(0, 16);
+
+/** A boolean field: only `true` (or the strings Gladys may send) turns it on. */
+const flag = (value) => value === true || value === 'true' || value === 1 || value === '1';
+
+export function validTimezone(timezone) {
+  if (typeof timezone !== 'string' || timezone === '' || timezone.length > 64) {
+    return false;
+  }
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: timezone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The interval in minutes, bounded to 60..1440 (each read wakes the car). */
+export function intervalOf(value) {
+  const minutes = Number(value);
+  if (value === '' || value === null || value === undefined || !Number.isFinite(minutes)) {
+    return TIMINGS.intervalDefault;
+  }
+  return Math.min(TIMINGS.intervalMax, Math.max(TIMINGS.intervalMin, Math.round(minutes)));
+}
+
 export function normalizeConfig(raw = {}) {
+  const email = String(raw?.email ?? '').trim();
+  const password = String(raw?.password ?? '');
+  const language = String(raw?.language ?? DEFAULTS.language)
+    .trim()
+    .toLowerCase();
+  const timezone = String(raw?.timezone ?? '').trim();
   return {
-    ...DEFAULT_CONFIG,
-    ...raw,
-    // Force the types: config may arrive as strings from a form.
-    latitude: Number(raw.latitude ?? DEFAULT_CONFIG.latitude),
-    longitude: Number(raw.longitude ?? DEFAULT_CONFIG.longitude),
-    poll_frequency: Number(raw.poll_frequency ?? DEFAULT_CONFIG.poll_frequency),
-    // The preference is a boolean; anything but an explicit false means true.
-    GLADYS_PREFER_LOCAL: raw.GLADYS_PREFER_LOCAL !== false,
+    email,
+    password,
+    /** The hash of the e-mail: the session and the stops in /data belong to it. */
+    account: email === '' ? '' : accountKey(email),
+    intervalMinutes: intervalOf(raw?.interval_minutes),
+    allowLock: flag(raw?.allow_lock),
+    allowUnlock: flag(raw?.allow_unlock),
+    allowTailgate: flag(raw?.allow_tailgate),
+    allowClimate: flag(raw?.allow_climate),
+    allowCharging: flag(raw?.allow_charging),
+    timezone: validTimezone(timezone) ? timezone : DEFAULTS.timezone,
+    language: LANGUAGES.includes(language) ? language : DEFAULTS.language,
   };
 }

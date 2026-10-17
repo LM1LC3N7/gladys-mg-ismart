@@ -12,44 +12,29 @@ the notes of the version's GitHub Release.
 
 ### Added
 
-- A working example of scene triggers, scene actions and dashboard widgets
-  (Gladys 5.1.0 or later).
-- `CHANGELOG.md`, rolled by the Release workflow.
-- A GitHub Release for every version, with its changelog section as notes: the
-  Gladys Supervision page links each version to the repository's releases.
-- CI runs the tests on Node 22 and 24, and builds the Docker image.
-- Dependabot keeps the npm dependencies and the GitHub Actions up to date.
-- `SECURITY.md` (how to report a vulnerability) and `CLAUDE.md` (project rules
-  for contributors and coding assistants).
-- Manifest tests: `version` matches `package.json`, `docker_image` is tagged
-  with it, descriptions hold 10 to 100 characters, placeholders are
-  multi-language objects.
-- The latitude and longitude fields show an example value as placeholder.
+- Sign-in to the SAIC iSMART cloud (Europe) with the e-mail and the password
+  of the MG iSMART app, as saic-ismart-client-ng; the token kept in `/data`,
+  no sign-in per read. A token refused by the gateway signs in again at most
+  once per 24 h (SAIC keeps one session per account), then stops with spaced
+  new tries.
+- One device per car: battery, range, charge status, charging, plugged in,
+  charging power (kW), odometer, locks (read only), four doors and boot,
+  latitude and longitude (no history), cabin temperature, climate state, last
+  report of the car, last command.
+- Buttons: refresh now (at most every 10 minutes), lock, unlock, open the
+  boot, start and stop the climate, start and stop charging; each command
+  behind its own option, all off by default. A command reads the car again,
+  decides on that state only, is sent once, and shows its outcome in "Last
+  command".
+- Reads every 3 hours by default (60 minutes to 24 hours), every 30 minutes
+  while charging; a car that does not answer is read twice as late each time
+  (up to once a day); the next read of each car kept in `/data`, so a restart
+  never wakes the car early.
+- Resilience: a refused password stops with one new try after 6 h, then every
+  24 h; 429 pauses every path (1 minute to 6 hours), kept in `/data`; network
+  and 5xx errors wait the interval.
+- "Test the connection" button (the vehicle list only, never wakes a car);
+  documentation in English and French; `LICENSE` and
+  `THIRD_PARTY_NOTICES.md` shipped in the image.
 
-### Changed
-
-- Node.js 22 or later is required (Node 20 is end-of-life).
-- Integration SDK 0.15.0. The tests now run against the fake Gladys of the
-  SDK, which refuses the payloads Gladys refuses.
-- The refresh interval is one minute minimum, the fastest Gladys polls a
-  device. The plug's power is only sent when it changes, and every 30
-  minutes otherwise.
-
-### Fixed
-
-- Gladys refused the devices of the Discovery tab: the weather station and
-  the plug declared their poll frequency in seconds instead of one of the
-  values Gladys accepts, and were never polled. They now poll every minute,
-  and the readings follow the refresh interval of the configuration.
-
-- The release commit no longer fails `npm run format:check`: the Release
-  workflow updates the manifest `version` and `docker_image` in place instead
-  of re-printing the whole file with `jq`.
-- The integration can write to `/data`: the image creates the directory owned
-  by the `node` user, a new Docker volume was owned by root.
-- A sub-container running the integration's own image follows it to the new
-  tag at each release, as well as in the manifest of the build summary: it kept
-  the previous tag, which may not exist on the registry. Sub-containers on a
-  third-party image (a broker, a database...) keep theirs.
-
-[Unreleased]: https://github.com/GladysAssistant/integration-template-js/commits/main
+[Unreleased]: https://github.com/LM1LC3N7/gladys-mg-ismart/commits/main
