@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { gzipSync } from 'node:zlib';
 import { normalizeConfig } from '../src/config.js';
-import { HOUR, TIMINGS } from '../src/constants.js';
+import { SaicClient } from '../src/client.js';
+import { HOUR, MINUTE, TIMINGS } from '../src/constants.js';
 import { httpRequest } from '../src/saic.js';
 import { normalizeMemory } from '../src/store.js';
 
@@ -72,7 +73,33 @@ test('what /data gives back is repaired and bounded to 24 h', () => {
     pause: null,
     block: null,
     reads: {},
+    pending: {},
   });
+});
+
+test('a short token is renewed at half its lifetime, not 10 minutes before its end', async () => {
+  let calls = 0;
+  const client = new SaicClient({
+    now: () => NOW,
+    transport: async () => {
+      calls += 1;
+      throw new Error('no network');
+    },
+  });
+  client.configure({
+    email: 'a@b.c',
+    password: 'p',
+    session: { token: 't', expiresAt: NOW + 6 * MINUTE, issuedAt: NOW - 4 * MINUTE },
+  });
+  await client.ensureToken();
+  assert.equal(calls, 0, '6 minutes left of 10: still valid');
+  client.configure({
+    email: 'a@b.c',
+    password: 'p',
+    session: { token: 't', expiresAt: NOW + 4 * MINUTE, issuedAt: NOW - 6 * MINUTE },
+  });
+  await assert.rejects(client.ensureToken());
+  assert.equal(calls, 1, '4 minutes left of 10: a new sign-in');
 });
 
 test('the transport inflates gzip answers and bounds the size', async (t) => {

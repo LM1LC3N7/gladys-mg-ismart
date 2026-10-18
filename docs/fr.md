@@ -17,10 +17,14 @@ inversement. Le plus simple : créez un **compte secondaire** (autre e-mail)
 dans l'application MG iSMART, partagez-lui la voiture depuis votre compte
 principal, et donnez ce compte secondaire à Gladys.
 
-Si vous utilisez le même compte, l'intégration se reconnecte **une seule
-fois par 24 h** quand sa session est prise ; reprise de nouveau dans ces
-24 h, elle se met en pause (nouvel essai après 6 h, puis toutes les 24 h)
-pour ne pas déconnecter l'application en boucle.
+Si vous utilisez le même compte, l'intégration se reconnecte **au plus une
+fois par 24 h** quand sa session est prise. Reprise de nouveau, elle se met
+en pause : nouvel essai 6 h plus tard au plus tôt, puis toutes les 24 h, et
+jamais moins de 24 h après sa dernière reconnexion (le bouton « Tester la
+connexion » compte aussi). Elle ne déconnecte donc pas l'application en
+boucle. Le **renouvellement du jeton**, quand il arrive à expiration, est
+aussi une connexion : il déconnecte l'application si elle utilise le même
+compte.
 
 ## Ce que vous obtenez
 
@@ -57,14 +61,18 @@ jamais écrite dans les journaux ni dans `/data`.
 l'empêcher de démarrer. Donc :
 
 - une lecture par voiture **toutes les 3 heures** par défaut (réglable de
-  60 minutes à 24 heures), **toutes les 30 minutes en charge** (la voiture
-  est alors éveillée et branchée) ;
+  60 minutes à 24 heures), **toutes les 30 minutes en charge** seulement
+  quand la voiture charge vraiment (branchée, puissance au-dessus de 0), et
+  pendant 12 heures au plus : ensuite, retour à l'intervalle normal ;
 - une voiture qui ne répond pas (30 secondes d'attente) est relue après
   l'intervalle, puis deux fois plus tard à chaque silence (jusqu'à une fois
-  par jour) : jamais en boucle ;
+  par jour) : jamais en boucle. Pendant ce temps, les boutons de cette
+  voiture sont refusés ;
 - une erreur n'est jamais relue plus vite que l'intervalle ;
-- le bouton **Actualiser maintenant** relit la voiture tout de suite, au plus
-  toutes les 10 minutes ;
+- **chaque appui sur un bouton réveille la voiture** : « Actualiser
+  maintenant » la relit, et chaque commande la relit avant d'agir. Les appuis
+  sont donc limités par voiture : **2 minutes d'écart au moins, 6 par heure
+  au plus** ; au-delà, l'appui est refusé tout de suite avec un message ;
 - la liste des véhicules (qui ne réveille pas la voiture) est relue au
   démarrage, puis toutes les 24 heures ;
 - l'heure de la prochaine lecture est gardée dans `/data` : un redémarrage
@@ -110,16 +118,25 @@ Comment une commande se passe :
 1. Gladys reçoit tout de suite la réponse « acceptée » (la passerelle met
    souvent plus de 10 secondes, et Gladys n'attend que 5 secondes) ;
    « Dernière commande » affiche « relecture de la voiture… ».
-2. L'intégration **relit la voiture** et décide seulement sur cet état relu,
-   jamais sur la mémoire : une commande inutile (déjà verrouillée, clim déjà
-   en marche…) n'est pas envoyée ; un état inconnu, une voiture qui ne répond
-   pas, une voiture non branchée (pour la charge) refusent la commande sans
-   l'envoyer.
-3. La commande part **une seule fois**, jamais renvoyée après un échec.
-4. « Dernière commande » donne le résultat : envoyée et confirmée par MG,
-   envoyée sans confirmation (vérifiez avant de réessayer), refusée par MG,
-   ou non envoyée avec la raison. La voiture est relue environ 90 secondes
-   plus tard.
+2. L'intégration **relit la voiture** (ce qui la réveille) et décide
+   seulement sur cet état relu, jamais sur la mémoire : une commande inutile
+   (déjà verrouillée, clim déjà en marche…) n'est pas envoyée ; un état
+   inconnu, un relevé de plus de 10 minutes (« état périmé »), une voiture
+   qui ne répond pas, une voiture non branchée (pour la charge) refusent la
+   commande sans l'envoyer. Un état sans date n'est jamais lu comme « déjà
+   fait » : la commande part.
+3. L'option est revérifiée juste avant l'envoi ; la commande part **une
+   seule fois**, jamais renvoyée après un échec.
+4. « Dernière commande » donne le résultat : envoyée et confirmée par MG
+   (pour verrouiller, déverrouiller et la clim, seulement si l'état renvoyé
+   correspond), envoyée avec un état non confirmé, envoyée avec un échec
+   signalé par la voiture, envoyée sans confirmation (la passerelle l'a prise
+   puis n'a plus répondu : vérifiez avant de réessayer), refusée par MG
+   (avant de la prendre), ou non envoyée avec la raison. La voiture est
+   relue environ 90 secondes plus tard.
+
+Après un redémarrage pendant une commande, « Dernière commande » indique
+qu'elle a été interrompue : vérifiez l'état de la voiture.
 
 Une commande à la fois par voiture. L'intégration n'envoie jamais de code
 (SMS, e-mail) : la connexion se fait par e-mail et mot de passe seulement.
@@ -147,6 +164,9 @@ Une commande à la fois par voiture. L'intégration n'envoie jamais de code
   charge programmée, verrou de la prise, alarmes.
 - Les journaux ne contiennent jamais le mot de passe, le jeton, le VIN, la
   position, ni le texte des réponses de la passerelle.
+- L'identifiant de chaque voiture dans Gladys est **pseudonymisé** : une
+  empreinte SHA-256 tronquée du VIN. Ce n'est pas anonyme : qui connaît le
+  VIN peut la recalculer.
 
 ## Crédits
 

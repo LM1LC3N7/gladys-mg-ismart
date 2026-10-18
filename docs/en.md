@@ -17,9 +17,11 @@ create a **second account** (another e-mail) in the MG iSMART app, share the
 car with it from your main account, and give that second account to Gladys.
 
 If you use the same account, the integration signs in again **once per
-24 hours** at most when its session is taken; taken again within those
-24 hours, it pauses (new try after 6 h, then every 24 h) so as not to sign
-the app out in a loop.
+24 hours at most** when its session is taken. Taken again, it pauses: a new
+try 6 h later at the earliest, then every 24 h, and never less than 24 h
+after its last sign-in (the "Test the connection" button counts too). So it
+never signs the app out in a loop. **Renewing the token** when it expires is
+a sign-in too: it signs the app out when it uses the same account.
 
 ## What you get
 
@@ -56,12 +58,17 @@ a parked car too often can drain that battery until the car no longer
 starts. So:
 
 - one read per car **every 3 hours** by default (60 minutes to 24 hours),
-  **every 30 minutes while charging** (the car is then awake and plugged in);
+  **every 30 minutes while charging** only when the car really charges
+  (plugged in, power above 0), and for 12 hours at most: then back to the
+  normal interval;
 - a car that does not answer (30 seconds of waiting) is read again after the
   interval, then twice later after each silence (up to once a day): never in
-  a loop;
+  a loop. Meanwhile, the buttons of that car are refused;
 - an error is never read again sooner than the interval;
-- the **Refresh now** button reads the car at once, at most every 10 minutes;
+- **each button press wakes the car up**: "Refresh now" reads it, and each
+  command reads it before acting. Presses are limited per car: **2 minutes
+  apart at least, 6 per hour at most**; beyond, the press is refused at once
+  with a message;
 - the vehicle list (which does not wake the car) is read at start, then
   every 24 hours;
 - the time of the next read is kept in `/data`: a restart does not wake the
@@ -105,14 +112,23 @@ How a command goes:
 1. Gladys gets the answer "accepted" at once (the gateway often takes more
    than 10 seconds, and Gladys waits 5 seconds only); "Last command" shows
    "reading the car first…".
-2. The integration **reads the car again** and decides on that fresh state
-   only, never on memory: a useless command (already locked, climate already
-   on…) is not sent; an unknown state, a car that does not answer, a car not
-   plugged in (for charging) refuse the command without sending it.
-3. The command is sent **once**, never sent again after a failure.
-4. "Last command" gives the outcome: sent and confirmed by MG, sent but not
-   confirmed (check before trying again), refused by MG, or not sent with the
-   reason. The car is read again about 90 seconds later.
+2. The integration **reads the car again** (which wakes it) and decides on
+   that fresh state only, never on memory: a useless command (already
+   locked, climate already on…) is not sent; an unknown state, a report more
+   than 10 minutes old ("stale state"), a car that does not answer, a car not
+   plugged in (for charging) refuse the command without sending it. An
+   undated state is never read as "already done": the command is sent.
+3. The option is checked again right before sending; the command is sent
+   **once**, never sent again after a failure.
+4. "Last command" gives the outcome: sent and confirmed by MG (for lock,
+   unlock and climate, only when the state sent back matches), sent with the
+   state not confirmed, sent with a failure reported by the car, sent but not
+   confirmed (the gateway took it then stopped answering: check before trying
+   again), refused by MG (before taking it), or not sent with the reason. The
+   car is read again about 90 seconds later.
+
+After a restart during a command, "Last command" says it was interrupted:
+check the state of the car.
 
 One command at a time per car. The integration never sends a code (SMS,
 e-mail): it signs in with the e-mail and the password only.
@@ -138,6 +154,8 @@ e-mail): it signs in with the e-mail and the password only.
   port lock, alarms.
 - The logs never hold the password, the token, the VIN, the position, nor
   the text of the gateway's answers.
+- The id of each car in Gladys is **pseudonymised**: a truncated SHA-256 of
+  the VIN. It is not anonymous: anyone who knows the VIN can compute it.
 
 ## Credits
 

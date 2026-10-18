@@ -82,22 +82,38 @@ export class SaicClient {
     this.base = base;
     this.email = '';
     this.password = '';
-    /** { token, expiresAt } | null */
+    /** { token, expiresAt, issuedAt } | null */
     this.session = null;
-    /** When the token was last refused (the 24 h window of a new sign-in). */
-    this.takenAt = 0;
+    /**
+     * The budget of the sign-ins after a refused token (SAIC keeps one
+     * session per account): `at` the last automatic sign-in after a refusal
+     * or a stop (one per 24 h), `refusedAt` the last refused token, `streak`
+     * the session_taken stops in a row (reset after 24 h without a refusal).
+     */
+    this.taken = { at: 0, refusedAt: 0, streak: 0 };
     /** One sign-in at a time. */
     this.authenticating = undefined;
     /** Per-request timeout; undefined = the default (shorter for the test button). */
     this.timeout = undefined;
   }
 
-  configure({ email, password, session = null, takenAt = 0 }) {
+  configure({ email, password, session = null, taken = null }) {
     this.email = email;
     this.password = password;
     this.session =
       session && typeof session.token === 'string' && session.token !== '' ? session : null;
-    this.takenAt = Number.isFinite(takenAt) ? takenAt : 0;
+    const number = (value) => (Number.isFinite(value) ? value : 0);
+    this.taken = {
+      at: number(taken?.at),
+      refusedAt: number(taken?.refusedAt),
+      streak: Number.isInteger(taken?.streak) ? taken.streak : 0,
+    };
+  }
+
+  /** A sign-in about to be made for a stop's new try or the test button: it counts. */
+  async countReconnect() {
+    this.taken.at = this.now();
+    await this.changed();
   }
 
   get hasCredentials() {
@@ -196,7 +212,9 @@ export class SaicClient {
     try {
       json = JSON.parse(text);
     } catch {
-      if (status === 401 || status === 403) {
+      // Only an HTTP 401 means a refused token here: a 403 without the JSON
+      // envelope comes from a WAF or a CDN, a passing error.
+      if (status === 401) {
         throw new SaicError('logged_out', 'token refused', { status });
       }
       throw ok
@@ -207,8 +225,11 @@ export class SaicClient {
       throw new SaicError('bad_response', 'an answer that is not an object', { status });
     }
     const code = Number.isInteger(json.code) ? json.code : -1;
-    if (code === 401 || code === 403 || status === 401 || status === 403) {
+    if (code === 401 || code === 403 || status === 401) {
       throw new SaicError('logged_out', 'token refused', { status, code });
+    }
+    if (status === 403) {
+      throw new SaicError('http', 'request refused', { status });
     }
     const raw = headers['event-id'];
     const eventId = typeof raw === 'string' && /^[\w-]{1,64}$/.test(raw) ? raw : undefined;
@@ -277,7 +298,7 @@ export class SaicClient {
     }
     const lifetime =
       Number.isFinite(seconds) && seconds > 60 ? seconds * 1000 : TIMINGS.tokenDefaultLifetime;
-    this.session = { token, expiresAt: this.now() + lifetime };
+    this.session = { token, expiresAt: this.now() + lifetime, issuedAt: this.now() };
     await this.changed();
     return this.session;
   }
@@ -290,13 +311,21 @@ export class SaicClient {
     }
   }
 
-  /** A token valid for 10 more minutes, else a new sign-in. */
+  /**
+   * A token valid for min(10 minutes, half its lifetime) more, else a new
+   * sign-in (which signs the MG app out too, when it uses the same account).
+   */
   async ensureToken(options) {
     if (this.authenticating) {
       await this.authenticating;
     }
-    if (this.session && this.now() < this.session.expiresAt - TIMINGS.tokenMargin) {
-      return;
+    const s = this.session;
+    if (s) {
+      const lifetime = Number.isFinite(s.issuedAt) ? s.expiresAt - s.issuedAt : Infinity;
+      const margin = Math.min(TIMINGS.tokenMargin, lifetime / 2);
+      if (this.now() < s.expiresAt - margin) {
+        return;
+      }
     }
     await this.login(options);
   }
@@ -316,13 +345,19 @@ export class SaicClient {
       }
       await this.logout();
       const now = this.now();
-      if (now - this.takenAt < TIMINGS.takenWindow) {
+      const taken = this.taken;
+      if (now - taken.refusedAt >= TIMINGS.takenWindow) {
+        taken.streak = 0;
+      }
+      taken.refusedAt = now;
+      if (now - taken.at < TIMINGS.takenWindow) {
+        await this.changed();
         throw new SaicError('session_taken', 'the session is used by another sign-in', {
           status: err.status,
           code: err.code,
         });
       }
-      this.takenAt = now;
+      taken.at = now;
       await this.changed();
     }
     await this.login(options);
@@ -346,13 +381,22 @@ export class SaicClient {
    * A call answered through an event id (execute_api_call_with_event_id): sent
    * with `event-id: 0`, then again with the event id the gateway gives while
    * it waits for the car, every `delay`, for `budget` at most. Past it:
-   * `no_answer`. `onSent`: called once the first request is answered (a
-   * command was received by the gateway).
+   * `no_answer`. `onAccepted`: called once the gateway took the request (its
+   * first answer gave an event id or the data, without a refusal code): a
+   * command may then have been executed, whatever comes next. `guard`:
+   * checked right before the first request; false cancels it unsent.
    */
-  async eventCall(method, path, { delay, budget = TIMINGS.eventBudget, onSent, ...options } = {}) {
+  async eventCall(
+    method,
+    path,
+    { delay, budget = TIMINGS.eventBudget, onAccepted, guard, ...options } = {},
+  ) {
     return this.authed(async (token) => {
       const start = this.now();
       let eventId = '0';
+      if (guard && !guard()) {
+        throw new SaicError('cancelled', 'cancelled before sending', { notSent: true });
+      }
       for (;;) {
         const answer = await this.send(method, path, {
           ...options,
@@ -360,7 +404,13 @@ export class SaicClient {
           headers: { 'event-id': eventId },
         });
         const result = this.envelope(answer);
-        onSent?.();
+        if (
+          eventId === '0' &&
+          !FINAL_CODES.has(result.code) &&
+          (result.eventId || (result.code === 0 && 'data' in result.json))
+        ) {
+          onAccepted?.();
+        }
         if (FINAL_CODES.has(result.code)) {
           throw new SaicError('api', 'the MG gateway refused the request', { code: result.code });
         }
@@ -383,10 +433,10 @@ export class SaicClient {
     }, options);
   }
 
-  /** The vehicles of the account (does not wake the cars). */
+  /** The vehicles of the account (does not wake the cars); null when malformed. */
   async vehicles(options) {
     const data = await this.read(PATHS.vehicles, options);
-    return isObject(data) && Array.isArray(data.vinList) ? data.vinList : [];
+    return isObject(data) && Array.isArray(data.vinList) ? data.vinList : null;
   }
 
   /** The vehicle status (wakes the car): vehStatusReqType 2, as the reference. */
@@ -427,7 +477,8 @@ export class SaicClient {
         ...options,
         noRelogin: true,
         json,
-        delay: TIMINGS.eventDelayCommand,
+        // The charging control is polled every 3 s, the others every second.
+        delay: path === PATHS.chargingControl ? TIMINGS.eventDelayRead : TIMINGS.eventDelayCommand,
       });
     switch (kind) {
       case 'lock':

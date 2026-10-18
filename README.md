@@ -28,25 +28,34 @@ Gladys ⇄ SDK ⇄ src/handlers.js ⇄ src/app.js (MgApp)
 
 - **Sign-in** (as saic-ismart-client-ng): `oauth/token` with the e-mail and
   the SHA-1 of the password; the token goes in `blade-auth` and is kept until
-  10 minutes before it expires (in `/data`, with a hash of the e-mail), so a
-  restart does not sign in. A token refused by the gateway signs in again at
-  most once per 24 h; refused again, the integration stops (6 h, then 24 h)
-  instead of fighting the MG app.
+  min(10 minutes, half its lifetime) before it expires (in `/data`, with a
+  hash of the e-mail), so a restart does not sign in. Every sign-in signs the
+  MG app out when it uses the same account. A token refused by the gateway
+  signs in again at most once per 24 h (stop retries and the test button
+  count); refused again, the integration stops (6 h at the earliest, then
+  24 h, never sooner than 24 h after the last sign-in; the stops in a row are
+  kept in `/data`) instead of fighting the MG app.
 - **Encoding**: every body is AES-128-CBC encoded with MD5-derived keys and
   every request signed with an HMAC-SHA256 "verification string", as the app
   does (checked against the reference's test vectors).
 - **Reads**: `vehicle/list` at start then every 24 h (no wake-up);
   `vehicle/status` then `vehicle/charging/mgmtData` per car (each wakes the
   car: event-id polling every 3 s, 30 s at most) every 3 h by default
-  (60–1440 min), every 30 min while charging; a silent car is read twice as
-  late each time (up to 24 h). The next read of each car is kept in `/data`.
+  (60–1440 min), every 30 min while it charges with power flowing (12 h at
+  most); a silent car is read twice as late each time (up to 24 h). The next
+  read of each car is reserved in `/data` before the read.
 - **Commands**: `BUTTON/PUSH` features only, never a switch nor a binary
   command; each behind its own option (`allow_lock`, `allow_unlock`,
   `allow_tailgate`, `allow_climate`, `allow_charging`), all off by default.
-  Gladys is answered at once; the command then reads the car again, decides
-  on that fresh state only, is sent once (polled with its event id, never
-  re-sent), and its outcome goes to the "Last command" text feature. One at a
-  time per car; every SAIC call goes through one queue.
+  Each press wakes the car (refresh, or the read before a command): 2 min
+  apart, 6 per hour per car at most, none while a silent car is left asleep.
+  Gladys is answered at once; the command then reads the car again, refuses
+  a report older than 10 min, decides on that fresh state only, checks its
+  option again, is sent once (polled with its event id, never re-sent), and
+  its outcome goes to the "Last command" text feature ("refused by MG" only
+  before the gateway took it; the status sent back must match to say
+  "confirmed"). One at a time per car; every SAIC call goes through one
+  queue. Ids are pseudonymised (a truncated SHA-256 of the VIN).
 - **Errors**: refused credentials stop with one new try after 6 h, then every
   24 h; 429 pauses every path (1 min – 6 h, kept in `/data`); network and 5xx
   wait the interval. Logs carry error codes only: never the password, the

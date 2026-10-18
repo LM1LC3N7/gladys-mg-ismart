@@ -1,8 +1,9 @@
 // -----------------------------------------------------------------------------
 // The integration: the MG iSMART account (e-mail and password), the vehicle
 // list, one read per car and per interval (each read WAKES the car: 3 h by
-// default, 30 min while it charges, spaced twice as much each time it does
-// not answer), the Gladys devices and their states, the transport badges,
+// default, 30 min while it charges with power flowing (12 h at most), spaced
+// twice as much each time it does not answer; clicks within a budget of 6
+// per hour, 2 min apart), the Gladys devices and their states, the badges,
 // the "Test the connection" button, and the device buttons (refresh, lock,
 // unlock, boot, climate, charge), refused unless their option is on.
 //
@@ -16,7 +17,7 @@
 import { DEVICE_TRANSPORTS, createLogger } from '@gladysassistant/integration-sdk';
 import { SaicClient } from './client.js';
 import { normalizeConfig } from './config.js';
-import { BUTTONS, FEATURES, LIMITS, MINUTE, TIMINGS } from './constants.js';
+import { BUTTONS, FEATURES, HOUR, LIMITS, MINUTE, TIMINGS } from './constants.js';
 import { buildDevice, clock, parseFeatureId, statesOf, vehicleIds } from './devices.js';
 import {
   ALREADY,
@@ -45,6 +46,21 @@ const HOLDS = new Set(['rate_limited', 'no_credentials', ...Object.keys(STOPS)])
 const CAR_ONLY = new Set(['no_answer', 'api', 'bad_response']);
 /** Errors meaning the gateway did not answer usefully. */
 const OFFLINE = new Set(['network', 'timeout', 'unavailable', 'bad_response', 'size', 'http']);
+/** Errors before the gateway took a command: it was not sent. */
+const NOT_SENT = new Set([
+  'rate_limited',
+  'refused',
+  'no_credentials',
+  'session_taken',
+  'cancelled',
+]);
+/** The status a command answer must carry to be "confirmed". */
+const CONFIRMS = {
+  [FEATURES.LOCK]: (s) => s.locked === 1,
+  [FEATURES.UNLOCK]: (s) => s.locked === 0,
+  [FEATURES.CLIMATE_START]: (s) => s.climate === 2,
+  [FEATURES.CLIMATE_STOP]: (s) => s.climate === 0,
+};
 
 export class MgApp {
   constructor({
@@ -73,8 +89,8 @@ export class MgApp {
     this.results = new Map();
     /** ids with a command or a refresh waiting or running. */
     this.active = new Set();
-    /** id -> when the refresh button last read it */
-    this.refreshedAt = new Map();
+    /** id -> the wake-ups asked by a click in the last hour (refresh, commands). */
+    this.wakes = new Map();
     this.published = undefined;
     this.badges = new Map();
     this.timer = undefined;
@@ -117,8 +133,17 @@ export class MgApp {
       this.pauseKind = 'rate';
     }
     const session = this.memory.session?.account === account ? this.memory.session : null;
-    const takenAt = this.memory.taken?.account === account ? this.memory.taken.at : 0;
-    this.client.configure({ email, password, session, takenAt });
+    const taken = this.memory.taken?.account === account ? this.memory.taken : null;
+    this.client.configure({ email, password, session, taken });
+    // A command that was running when the container stopped: say so, its
+    // outcome is unknown.
+    for (const id of Object.keys(this.memory.pending)) {
+      this.results.set(id, RESULTS.interrupted);
+    }
+    if (Object.keys(this.memory.pending).length > 0) {
+      this.memory.pending = {};
+      await this.saveMemory();
+    }
     const block = this.memory.block?.account === account ? this.memory.block : null;
     this.block = block
       ? { kind: block.kind, retryAt: block.retryAt, retries: block.retries, code: block.code }
@@ -239,10 +264,10 @@ export class MgApp {
 
   /** The token of the client and the time it was last refused, with their account. */
   async persist() {
-    const { session, takenAt } = this.client;
+    const { session, taken } = this.client;
     const account = this.config.account;
     this.memory.session = session ? { account, ...session } : null;
-    this.memory.taken = takenAt > 0 ? { account, at: takenAt } : null;
+    this.memory.taken = { account, ...taken };
     await this.saveMemory();
   }
 
@@ -268,11 +293,41 @@ export class MgApp {
     return this.config.intervalMinutes * MINUTE;
   }
 
-  /** The wait before the next read of a car, from what it just said. */
-  waitAfter(snapshot) {
-    return snapshot?.charging
-      ? Math.min(TIMINGS.chargingInterval, this.intervalMs)
-      : this.intervalMs;
+  /**
+   * The next read of a car after a successful read. The short cadence only
+   * while it charges with power flowing (charging, not unplugged, > 0 kW),
+   * and for 12 h at most: then back to the normal interval.
+   */
+  readEntry(id, snapshot) {
+    const now = this.now();
+    const flowing =
+      snapshot?.charging === true && snapshot.plugged !== false && snapshot.chargePower > 0;
+    const since = flowing ? (this.memory.reads[id]?.chargingSince ?? now) : undefined;
+    const short = flowing && now - since < TIMINGS.chargingMax;
+    const wait = short ? Math.min(TIMINGS.chargingInterval, this.intervalMs) : this.intervalMs;
+    return { next: now + wait, asleep: 0, ...(flowing ? { chargingSince: since } : {}) };
+  }
+
+  /** M1: the next read reserved in /data BEFORE a read wakes the car (a crash keeps it). */
+  async reserve(id) {
+    const entry = this.memory.reads[id] ?? { asleep: 0 };
+    // asleep 0 while the read runs (a click then is not told "left asleep");
+    // the returned entry keeps the count for asleepAfter.
+    this.memory.reads[id] = { ...entry, asleep: 0, next: this.now() + this.intervalMs };
+    await this.saveMemory();
+    return entry;
+  }
+
+  /** After a car did not answer: twice the interval per silence in a row, 24 h at most. */
+  async asleepAfter(id, entry, err) {
+    const asleep = (entry.asleep ?? 0) + (err.kind === 'no_answer' ? 1 : 0);
+    const wait =
+      err.kind === 'no_answer'
+        ? Math.min(TIMINGS.asleepMax, this.intervalMs * 2 ** (asleep - 1))
+        : this.intervalMs;
+    this.memory.reads[id] = { next: this.now() + wait, asleep };
+    await this.saveMemory();
+    return wait;
   }
 
   /** The next run: the stop's next try, the end of a pause, else the first car due. */
@@ -318,11 +373,18 @@ export class MgApp {
 
   noteVehicles(list) {
     const vehicles = new Map();
-    for (const info of list) {
+    for (const info of list ?? []) {
       const vehicle = readVehicle(info);
       if (vehicle && !vehicles.has(vehicle.id) && vehicles.size < LIMITS.vehicles) {
         vehicles.set(vehicle.id, vehicle);
       }
+    }
+    if (vehicles.size === 0) {
+      // An empty or malformed list: the cars known so far stay, and the list
+      // is read again after the normal interval (not 24 h).
+      this.logger.warn('MG iSMART: the vehicle list is empty or malformed; kept the last one');
+      this.vehiclesAt = this.now() - TIMINGS.vehicleListInterval + this.intervalMs;
+      return;
     }
     this.vehicles = vehicles;
     this.vehiclesAt = this.now();
@@ -351,6 +413,11 @@ export class MgApp {
         !this.client.session ||
         this.now() - this.vehiclesAt >= TIMINGS.vehicleListInterval
       ) {
+        if (this.retrying?.kind === 'session_taken' && !this.client.session) {
+          // The new try of a session_taken stop signs in: it uses the
+          // budget of one sign-in per 24 h.
+          await this.client.countReconnect();
+        }
         this.noteVehicles(await this.client.vehicles());
         if (generation !== this.generation) {
           return;
@@ -387,18 +454,12 @@ export class MgApp {
    * sooner than the interval.
    */
   async readCar(vehicle) {
-    const reads = this.memory.reads;
+    const entry = await this.reserve(vehicle.id);
     let status;
     try {
       status = await this.client.status(vehicle.vin);
     } catch (err) {
-      const asleep = (reads[vehicle.id]?.asleep ?? 0) + (err.kind === 'no_answer' ? 1 : 0);
-      const wait =
-        err.kind === 'no_answer'
-          ? Math.min(TIMINGS.asleepMax, this.intervalMs * 2 ** (asleep - 1))
-          : this.intervalMs;
-      reads[vehicle.id] = { next: this.now() + wait, asleep };
-      await this.saveMemory();
+      const wait = await this.asleepAfter(vehicle.id, entry, err);
       if (!CAR_ONLY.has(err.kind)) {
         throw err;
       }
@@ -408,20 +469,25 @@ export class MgApp {
       return { error: err };
     }
     let charging;
+    let held;
     try {
       charging = await this.client.charging(vehicle.vin);
     } catch (err) {
+      // A hold (429, a stop) still keeps the status just read; it is thrown after.
       if (HOLDS.has(err.kind)) {
-        throw err;
+        held = err;
       }
       this.logger.info(
         `MG iSMART: charging data of ${vehicle.name} not read (${errorReason(err)})`,
       );
     }
     const snapshot = readSnapshot({ status, charging }, this.now());
-    reads[vehicle.id] = { next: this.now() + this.waitAfter(snapshot), asleep: 0 };
+    this.memory.reads[vehicle.id] = this.readEntry(vehicle.id, snapshot);
     await this.saveMemory();
     this.apply(vehicle.id, snapshot);
+    if (held) {
+      throw held;
+    }
     return { snapshot };
   }
 
@@ -453,11 +519,22 @@ export class MgApp {
     const schedule = STOPS[err.kind];
     if (schedule) {
       // Never signed in again in a loop: one new try after 6 h, then every 24 h.
-      const retries = this.retrying?.retries ?? 0;
+      // session_taken counts its stops in a row in /data (reset only after
+      // 24 h without a refused token), and its new try never comes sooner
+      // than 24 h after the last automatic sign-in: one per 24 h.
+      const taken = err.kind === 'session_taken';
+      const retries = taken ? this.client.taken.streak : (this.retrying?.retries ?? 0);
       const wait = schedule[Math.min(retries, schedule.length - 1)];
+      const retryAt = taken
+        ? Math.max(this.now() + wait, this.client.taken.at + TIMINGS.takenWindow)
+        : this.now() + wait;
+      if (taken) {
+        this.client.taken.streak = retries + 1;
+        await this.persist();
+      }
       this.block = {
         kind: err.kind,
-        retryAt: this.now() + wait,
+        retryAt,
         retries: retries + 1,
         code: Number.isInteger(err.code) ? err.code : undefined,
       };
@@ -465,7 +542,7 @@ export class MgApp {
       this.memory.block = { account: this.config.account, ...this.block };
       await this.saveMemory();
       this.logger.warn(
-        `MG iSMART stopped: ${reason}; one new try in ${Math.round(wait / MINUTE)} min`,
+        `MG iSMART stopped: ${reason}; one new try in ${Math.round((retryAt - this.now()) / MINUTE)} min`,
       );
       await this.setStatus(false, this.blockMessage());
       return;
@@ -648,6 +725,10 @@ export class MgApp {
     await this.enqueue(async () => {
       this.client.timeout = TIMINGS.quickTimeout;
       try {
+        if (!this.client.session) {
+          // The sign-in of the test counts in the budget of one per 24 h.
+          await this.client.countReconnect();
+        }
         this.noteVehicles(
           await this.client.vehicles({ deadline: this.now() + TIMINGS.quickBudget }),
         );
@@ -685,13 +766,37 @@ export class MgApp {
     await this.flush();
   }
 
-  time() {
-    return clock(this.now(), this.config.timezone);
+  time(ms = this.now()) {
+    return clock(ms, this.config.timezone);
+  }
+
+  /**
+   * The wake-up budget of a car for clicks (refresh, and the read before each
+   * command): 2 minutes apart, 6 per hour; none while a silent car is left
+   * asleep. The error text, else undefined.
+   */
+  wakeRefusal(id) {
+    const now = this.now();
+    const entry = this.memory.reads[id];
+    if (entry?.asleep > 0 && now < entry.next) {
+      return ERRORS.asleep(this.time(entry.next));
+    }
+    const wakes = (this.wakes.get(id) ?? []).filter((t) => now - t < HOUR);
+    this.wakes.set(id, wakes);
+    const last = wakes.at(-1);
+    if (last !== undefined && now - last < TIMINGS.manualGap) {
+      return ERRORS.tooSoon(age(last + TIMINGS.manualGap - now));
+    }
+    if (wakes.length >= TIMINGS.manualPerHour) {
+      return ERRORS.tooMany(age(wakes[0] + HOUR - now));
+    }
+    return undefined;
   }
 
   /**
    * A button of a car. Checked now (role, value, option, connection, one at a
-   * time), answered at once; the work runs in the SAIC queue (see command()).
+   * time, wake-up budget), answered at once; the work runs in the SAIC queue
+   * (see command()).
    */
   async setValue(device, feature, value) {
     const parsed = parseFeatureId(feature?.external_id);
@@ -723,19 +828,22 @@ export class MgApp {
     if (this.active.has(vehicle.id)) {
       throw this.error(ERRORS.stillRunning);
     }
-    if (parsed.role === FEATURES.REFRESH) {
-      const left =
-        (this.refreshedAt.get(vehicle.id) ?? -Infinity) + TIMINGS.refreshCooldown - this.now();
-      if (left > 0) {
-        throw this.error(ERRORS.cooldown(age(left)));
-      }
-      this.refreshedAt.set(vehicle.id, this.now());
+    // Every press reads the car, so every press wakes it up.
+    const refusal = this.wakeRefusal(vehicle.id);
+    if (refusal) {
+      throw this.error(refusal);
     }
+    this.wakes.get(vehicle.id).push(this.now());
     this.active.add(vehicle.id);
     const name = COMMAND_NAMES[parsed.role];
     this.logger.info(`MG iSMART: ${name.en} asked for ${vehicle.name}`);
     if (parsed.role !== FEATURES.REFRESH) {
-      await this.result(vehicle.id, RESULTS.reading(name));
+      this.memory.pending[vehicle.id] = parsed.role;
+      await this.saveMemory();
+      // Never makes the ack wait for Gladys: the flush runs on its own.
+      this.results.set(vehicle.id, RESULTS.reading(name));
+      this.queueStates(vehicle.id);
+      this.flush();
     }
     const generation = this.generation;
     this.background = this.enqueue(() => this.command(vehicle, parsed.role, generation))
@@ -754,42 +862,27 @@ export class MgApp {
     }
   }
 
-  /** What a command must do on the state just read: { send } | { already } | { why }. */
+  /**
+   * What a command must do on the state just read: { send } | { already } |
+   * { why }. A missing value refuses. The climate counts as on only for
+   * remoteClimateStatus 2, as off only for 0 (fan only or defrost: sent).
+   */
   plan(role, s) {
-    const known = (...values) => values.every((v) => v !== undefined);
+    const decide = (known, already) =>
+      !known ? { why: WHY.unknownState } : already ? { already: true } : { send: true };
     switch (role) {
       case FEATURES.LOCK:
-        return !known(s.locked)
-          ? { why: WHY.unknownState }
-          : s.locked
-            ? { already: true }
-            : { send: true };
+        return decide(s.locked !== undefined, s.locked === 1);
       case FEATURES.UNLOCK:
-        return !known(s.locked)
-          ? { why: WHY.unknownState }
-          : !s.locked
-            ? { already: true }
-            : { send: true };
+        return decide(s.locked !== undefined, s.locked === 0);
       case FEATURES.OPEN_BOOT:
-        return !known(s.boot)
-          ? { why: WHY.unknownState }
-          : s.boot === 1
-            ? { already: true }
-            : { send: true };
+        return decide(s.boot !== undefined, s.boot === 1);
       case FEATURES.CLIMATE_START:
-        return !known(s.climateOn)
-          ? { why: WHY.unknownState }
-          : s.climateOn
-            ? { already: true }
-            : { send: true };
+        return decide(s.climate !== undefined, s.climate === 2);
       case FEATURES.CLIMATE_STOP:
-        return !known(s.climateOn)
-          ? { why: WHY.unknownState }
-          : !s.climateOn
-            ? { already: true }
-            : { send: true };
+        return decide(s.climate !== undefined, s.climate === 0);
       case FEATURES.CHARGE_START:
-        if (!known(s.charging, s.plugged)) {
+        if (s.charging === undefined || s.plugged === undefined) {
           return { why: WHY.unknownState };
         }
         if (s.charging) {
@@ -797,25 +890,37 @@ export class MgApp {
         }
         return s.plugged ? { send: true } : { why: WHY.notPlugged };
       case FEATURES.CHARGE_STOP:
-        return !known(s.charging)
-          ? { why: WHY.unknownState }
-          : !s.charging
-            ? { already: true }
-            : { send: true };
+        return decide(s.charging !== undefined, s.charging === false);
       default:
         return { why: WHY.unknownState };
     }
   }
 
   async command(vehicle, role, generation) {
+    try {
+      await this.commandNow(vehicle, role, generation);
+    } finally {
+      if (this.memory.pending[vehicle.id]) {
+        delete this.memory.pending[vehicle.id];
+        await this.saveMemory();
+      }
+    }
+  }
+
+  async commandNow(vehicle, role, generation) {
     const name = COMMAND_NAMES[role];
     const id = vehicle.id;
+    const option = BUTTONS[role];
     const stale = () =>
       generation !== this.generation ||
       Boolean(this.block) ||
       (this.now() < this.pausedUntil && this.pauseKind === 'rate');
+    const notSent = async (why) => {
+      await this.saveMemory();
+      await this.result(id, RESULTS.notSent(name, why, this.time()));
+    };
     if (stale()) {
-      await this.result(id, RESULTS.notSent(name, WHY.notConnected, this.time()));
+      await notSent(WHY.notConnected);
       return;
     }
     if (role === FEATURES.REFRESH) {
@@ -836,6 +941,7 @@ export class MgApp {
       return;
     }
     // A fresh read: the command decides on it only, never on what is in memory.
+    const entry = await this.reserve(id);
     let current;
     try {
       const status = await this.client.status(vehicle.vin);
@@ -848,49 +954,68 @@ export class MgApp {
         throw new SaicError('bad_response', 'the vehicle status is empty');
       }
     } catch (err) {
+      // A silent car is left asleep (the same spacing as the polling).
+      await this.asleepAfter(id, entry, err);
       await this.hold(err);
-      await this.result(id, RESULTS.notSent(name, WHY.readFailed(errorReason(err)), this.time()));
+      await notSent(WHY.readFailed(errorReason(err)));
+      this.scheduleNext();
       return;
     }
     this.apply(id, current);
-    this.memory.reads[id] = { next: this.now() + this.waitAfter(current), asleep: 0 };
-    const option = BUTTONS[role];
+    this.memory.reads[id] = this.readEntry(id, current);
     if (option && !this.config[option]) {
-      await this.result(id, RESULTS.notSent(name, WHY.disabled, this.time()));
+      await notSent(WHY.disabled);
       return;
     }
     if (stale()) {
-      await this.result(id, RESULTS.notSent(name, WHY.notConnected, this.time()));
+      await notSent(WHY.notConnected);
       return;
     }
-    const plan = this.plan(role, current);
+    // A state the car reported long ago is no state to act on.
+    if (current.statusTime !== undefined && this.now() - current.statusTime > TIMINGS.staleState) {
+      await notSent(WHY.stale(this.time(current.statusTime)));
+      return;
+    }
+    let plan = this.plan(role, current);
+    if (plan.already && current.statusTime === undefined) {
+      // "Already done" is never concluded on an undated state: the command
+      // (idempotent) is sent instead.
+      plan = { send: true };
+    }
     if (!plan.send) {
-      await this.result(id, RESULTS.notSent(name, plan.why ?? ALREADY[role], this.time()));
+      await notSent(plan.why ?? ALREADY[role]);
       return;
     }
     this.logger.info(`MG iSMART: sending ${name.en} to ${vehicle.name}`);
-    let answered = false;
+    let accepted = false;
     try {
       const data = await this.client.command(vehicle.vin, role, {
-        onSent: () => {
-          answered = true;
+        onAccepted: () => {
+          accepted = true;
         },
+        // Checked again right before the first request leaves.
+        guard: () => !stale() && (!option || Boolean(this.config[option])),
       });
-      await this.result(id, RESULTS.done(name, this.time()));
-      if (data?.basicVehicleStatus) {
-        // The answer of the command carries the status after it: its lock,
-        // doors and climate are shown at once (the snapshot kept stays the
-        // last full read).
-        this.pushStates(id, statesOf(readSnapshot({ status: data }, this.now()), this.config));
+      const { text, after } = this.outcome(role, name, data);
+      await this.result(id, text);
+      if (after) {
+        // The status after the command: its lock, doors and climate are shown
+        // at once, after the result (the snapshot kept stays the last full read).
+        this.pushStates(id, statesOf(after, this.config));
       }
     } catch (err) {
       await this.hold(err);
       const reason = errorReason(err);
       this.logger.warn(`MG iSMART: ${name.en} for ${vehicle.name} failed: ${reason}`);
-      if (err.kind === 'api' || err.kind === 'logged_out') {
+      if (accepted) {
+        // Taken by the gateway: it may have been executed, whatever came next.
+        await this.result(id, RESULTS.unconfirmed(name, reason, this.time()));
+      } else if (err.kind === 'cancelled') {
+        await notSent(WHY.disabled);
+      } else if (err.kind === 'api' || err.kind === 'logged_out') {
         await this.result(id, RESULTS.refusedByMg(name, reason, this.time()));
-      } else if (err.notSent && !answered) {
-        await this.result(id, RESULTS.notSent(name, { en: reason, fr: reason }, this.time()));
+      } else if (err.notSent || NOT_SENT.has(err.kind)) {
+        await notSent({ en: reason, fr: reason });
       } else {
         await this.result(id, RESULTS.unconfirmed(name, reason, this.time()));
       }
@@ -902,5 +1027,23 @@ export class MgApp {
     if (generation === this.generation) {
       this.scheduleNext();
     }
+  }
+
+  /**
+   * The outcome of an answered command: a failure the car reported
+   * (`failureType` non-zero), else "confirmed" only when the status it sends
+   * back matches (lock, unlock, climate), else "state not confirmed".
+   */
+  outcome(role, name, data) {
+    const time = this.time();
+    const after = data?.basicVehicleStatus ? readSnapshot({ status: data }, this.now()) : undefined;
+    if (Number.isInteger(data?.failureType) && data.failureType !== 0) {
+      return { text: RESULTS.carFailure(name, data.failureType, time), after };
+    }
+    const check = CONFIRMS[role];
+    if (!check || (after && check(after))) {
+      return { text: RESULTS.done(name, time), after };
+    }
+    return { text: RESULTS.notConfirmed(name, time), after };
   }
 }

@@ -99,6 +99,9 @@ test('the charging answer of the reference test: charging, plugged, 1.75 kW, 79 
   const out = readCharging(chargingData({ charging: false, gun: 0 }));
   assert.deepEqual([out.charging, out.plugged, out.status], [false, false, 'unplugged']);
   assert.deepEqual(readCharging(undefined).charging, undefined);
+  const superCharging = chargingData({ charging: true });
+  superCharging.chrgMgmtData.bmsChrgSts = 11;
+  assert.equal(readCharging(superCharging).charging, true, 'code 11 is charging');
   const silly = chargingData({ charging: true });
   silly.chrgMgmtData.bmsPackVol = 0;
   assert.equal(readCharging(silly).power, undefined, 'no voltage, no power');
@@ -116,7 +119,7 @@ test('the device: stable ids, units of the core only, buttons and read-only stat
   const vehicle = readVehicle(vehicleInfo());
   const device = buildDevice(gladys, vehicle, CONFIG);
   assert.equal(device.external_id, `ext:test-integration:vehicle:${vehicle.id}`);
-  assert.ok(!JSON.stringify(device).includes(VIN), 'the VIN never reaches Gladys');
+  assert.ok(!JSON.stringify(device).includes(VIN), 'the VIN is not written as is');
   // DEVICE_FEATURE_UNITS_BY_CATEGORY of the core (server/utils/constants.js).
   const allowed = {
     'electrical-vehicle-battery': [

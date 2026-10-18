@@ -65,7 +65,7 @@ export const COMMAND_NAMES = {
   refresh: both('Refresh', 'Actualisation'),
   lock: both('Lock', 'Verrouillage'),
   unlock: both('Unlock', 'Déverrouillage'),
-  'open-boot': both('Boot opening', 'Ouverture du coffre'),
+  'open-boot': both('Boot unlock', 'Déverrouillage du coffre'),
   'climate-start': both('Climate start', 'Démarrage de la climatisation'),
   'climate-stop': both('Climate stop', 'Arrêt de la climatisation'),
   'charge-start': both('Charge start', 'Démarrage de la charge'),
@@ -183,6 +183,20 @@ export const RESULTS = {
   refreshed: (time) => both(`Refreshed (${time}).`, `Actualisé (${time}).`),
   refreshFailed: (reason, time) =>
     both(`Refresh failed (${reason}, ${time}).`, `Actualisation impossible (${reason}, ${time}).`),
+  carFailure: (name, failure, time) =>
+    both(
+      `${name.en} sent, the car reported a failure (${failure}, ${time}): check the state.`,
+      `${name.fr} envoyé, échec signalé par la voiture (${failure}, ${time}) : vérifiez l'état.`,
+    ),
+  notConfirmed: (name, time) =>
+    both(
+      `${name.en} sent, state not confirmed (${time}): check it before trying again.`,
+      `${name.fr} envoyé, état non confirmé (${time}) : vérifiez-le avant de réessayer.`,
+    ),
+  interrupted: both(
+    'Last command interrupted (restart): check the state of the car.',
+    "Dernière commande interrompue (redémarrage) : vérifiez l'état de la voiture.",
+  ),
 };
 
 /** Why a command was not sent, after the read. */
@@ -193,6 +207,7 @@ export const WHY = {
     both(`the car could not be read (${reason})`, `la voiture n'a pas pu être relue (${reason})`),
   disabled: both('the option was turned off', "l'option a été désactivée"),
   notConnected: both('not connected to MG iSMART', 'pas connecté à MG iSMART'),
+  stale: (time) => both(`stale state (report of ${time})`, `état périmé (relevé de ${time})`),
 };
 
 /** Errors of a button press (Gladys shows the message as is). */
@@ -212,10 +227,20 @@ export const ERRORS = {
     'A command or a read of this car is still running: try again in a minute.',
     'Une commande ou une lecture de cette voiture est encore en cours : réessayez dans une minute.',
   ),
-  cooldown: (wait) =>
+  tooSoon: (wait) =>
     both(
-      `Read less than 10 minutes ago: each read wakes the car up. Try again in ${wait.en}.`,
-      `Lue il y a moins de 10 minutes : chaque lecture réveille la voiture. Réessayez dans ${wait.fr}.`,
+      `This car was woken up by a click less than 2 minutes ago: each press reads the car and wakes it (12 V battery). Try again in ${wait.en}.`,
+      `Cette voiture a été réveillée par un clic il y a moins de 2 minutes : chaque appui relit la voiture et la réveille (batterie 12 V). Réessayez dans ${wait.fr}.`,
+    ),
+  tooMany: (wait) =>
+    both(
+      `6 wake-ups of this car in the last hour already (refresh and commands): to spare its 12 V battery, try again in ${wait.en}.`,
+      `Déjà 6 réveils de cette voiture dans l'heure (actualisations et commandes) : pour ménager sa batterie 12 V, réessayez dans ${wait.fr}.`,
+    ),
+  asleep: (time) =>
+    both(
+      `The car did not answer its last read: it is left asleep until ${time} (12 V battery).`,
+      `La voiture n'a pas répondu à sa dernière lecture : elle est laissée endormie jusqu'à ${time} (batterie 12 V).`,
     ),
   unknownVehicle: both('Unknown vehicle.', 'Véhicule inconnu.'),
 };

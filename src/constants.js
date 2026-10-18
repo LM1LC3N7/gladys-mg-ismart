@@ -54,7 +54,7 @@ export const RVC_PARAM = {
 export const LOCK_ID = { TAILGATE: 2, DOORS: 3 };
 
 /** bmsChrgSts values meaning "charging" (ChrgMgmtData.is_bms_charging). */
-export const CHARGING_CODES = new Set([1, 3, 10, 12]);
+export const CHARGING_CODES = new Set([1, 3, 10, 11, 12]);
 
 /** BmsChargingStatusCode of the reference -> the word shown. */
 export const BMS_STATUS = {
@@ -164,8 +164,12 @@ export const TIMINGS = {
   intervalDefault: 180,
   intervalMin: 60,
   intervalMax: 1440,
-  /** While the last read said "charging" (the car is awake and on the grid). */
+  /**
+   * While the last read said "charging" with power flowing (the car is awake
+   * and on the grid); for 12 h at most, then the normal interval.
+   */
   chargingInterval: 30 * MINUTE,
+  chargingMax: 12 * HOUR,
   /** A car that did not answer: its next reads are spaced twice as much each time, up to 24 h. */
   asleepMax: 24 * HOUR,
   /** The vehicle list (does not wake the car): at start, then every 24 h. */
@@ -190,8 +194,14 @@ export const TIMINGS = {
   stateHeartbeat: 30 * MINUTE,
   /** The "Test the connection" button signs in at most this often. */
   testCooldown: 30_000,
-  /** The "Refresh" button of a vehicle wakes it at most this often. */
-  refreshCooldown: 10 * MINUTE,
+  /**
+   * The wake-ups asked by a click (refresh, and the read before each
+   * command), per car: 2 minutes apart at least, 6 per hour at most.
+   */
+  manualGap: 2 * MINUTE,
+  manualPerHour: 6,
+  /** A command refuses a state the car reported more than 10 minutes ago. */
+  staleState: 10 * MINUTE,
   /** One read of the vehicle after a command, to show its effect. */
   refreshAfterCommand: 90_000,
 };

@@ -25,7 +25,8 @@ const text = (value) =>
 
 /**
  * One vehicle of /vehicle/list. The id kept is a hash of the VIN (16 hex):
- * stable, and the VIN itself never reaches Gladys nor the logs.
+ * stable and pseudonymised (computable from the VIN, not anonymous); the VIN
+ * itself is not written to Gladys nor to the logs.
  */
 export function readVehicle(info) {
   if (!isObject(info) || typeof info.vin !== 'string' || !/^[A-Za-z0-9]{6,32}$/.test(info.vin)) {

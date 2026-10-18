@@ -153,6 +153,9 @@ export function fakeSaic({ now = () => Date.now() } = {}) {
       if (entry.error) {
         throw entry.error;
       }
+      if (entry.raw !== undefined) {
+        return { status: entry.status ?? 200, headers: entry.headers ?? {}, body: entry.raw };
+      }
       return answer(entry.status ?? 200, entry.json, entry.headers);
     }
     if (!request.signed || headers['tenant-id'] !== SAIC.tenantId) {
@@ -172,6 +175,7 @@ export function fakeSaic({ now = () => Date.now() } = {}) {
       server.issued += 1;
       server.token = `token-${server.issued}-secret`;
       server.secrets.push(server.token);
+      server.onLogin?.();
       return success({ access_token: server.token, expires_in: 86_400, token_type: 'bearer' });
     }
     if (!token || token !== server.token) {
@@ -188,7 +192,15 @@ export function fakeSaic({ now = () => Date.now() } = {}) {
           return answer(200, { code: 3, message: 'unknown vehicle' });
         }
         const waits = server.asleep.has(vehicle.vin) ? Infinity : (server.waits[vehicle.vin] ?? 1);
-        return eventAnswer(`status-${vehicle.vin}`, request, server.statuses[vehicle.vin], waits);
+        // The car reports "now" (30 s ago), unless the test fixes its time.
+        const data = { ...server.statuses[vehicle.vin] };
+        if (server.reportAge !== undefined) {
+          data.statusTime =
+            server.reportAge === null ? undefined : Math.floor((now() - server.reportAge) / 1000);
+        } else {
+          data.statusTime = Math.floor(now() / 1000) - 30;
+        }
+        return eventAnswer(`status-${vehicle.vin}`, request, data, waits);
       }
       case 'GET vehicle/charging/mgmtData': {
         if (!vehicle) {
@@ -224,10 +236,10 @@ export function fakeSaic({ now = () => Date.now() } = {}) {
           `control-${vehicle.vin}`,
           request,
           {
-            basicVehicleStatus: { ...basic },
+            basicVehicleStatus: { ...basic, ...server.answerOverride },
             rvcReqType: Buffer.from([Number(type)]).toString('base64'),
             rvcReqSts: 'AQ==',
-            failureType: 0,
+            failureType: server.failureType ?? 0,
           },
           1,
         );

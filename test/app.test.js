@@ -231,12 +231,13 @@ test('a refused password stops: one new try after 6 h, then every 24 h; kept acr
   assert.match(ack.data.message.fr, /n'ont pas été réveillées/);
 });
 
-test('the session taken by the app: one new sign-in, then a stop instead of a fight', async (t) => {
+test('the session taken by the app: one new sign-in per 24 h, then a stop instead of a fight', async (t) => {
   const store = memoryStore();
   const { gladys, server, advance } = await setup(t, { store });
   server.takeSession();
   await advance(3 * HOUR + MINUTE, 60_000);
   assert.equal(server.logins().length, 2, 'signed in again once');
+  const relogin = Date.now();
   assert.equal(last(gladys, 'battery-level'), 79);
   server.takeSession();
   await advance(3 * HOUR + MINUTE, 60_000);
@@ -244,10 +245,22 @@ test('the session taken by the app: one new sign-in, then a stop instead of a fi
   assert.equal(gladys.fake.connectionStatus.connected, false);
   assert.match(message(gladys).fr, /SAIC n'accepte qu'une session/);
   assert.equal(store.data.block.kind, 'session_taken');
+  assert.equal(store.data.taken.streak, 1, 'the stops in a row are kept in /data');
   assert.equal(gladys.fake.transports.at(-1).transport, DEVICE_TRANSPORTS.UNREACHABLE);
-  await advance(6 * HOUR, 60_000);
-  assert.equal(server.logins().length, 3, 'a new try after 6 h');
+  await advance(relogin + 24 * HOUR - Date.now() - 2 * MINUTE, 60_000);
+  assert.equal(server.logins().length, 2, 'the new try waits 24 h after the last sign-in');
+  await advance(5 * MINUTE, 60_000);
+  assert.equal(server.logins().length, 3);
   assert.equal(gladys.fake.connectionStatus.connected, true);
+});
+
+test('the app takes the session 1 h after each sign-in, for 72 h: 4 sign-ins at most', async (t) => {
+  const server = fakeSaic();
+  server.onLogin = () => setTimeout(() => server.takeSession(), HOUR);
+  const { advance } = await setup(t, { server });
+  await advance(72 * HOUR, 60_000);
+  assert.ok(server.logins().length <= 4, `${server.logins().length} sign-ins in 72 h`);
+  assert.ok(server.logins().length >= 3, 'never a dead integration');
 });
 
 test('429: a bounded pause for every path, kept in /data', async (t) => {
@@ -262,12 +275,20 @@ test('429: a bounded pause for every path, kept in /data', async (t) => {
   assert.equal(store.data.pause.kind, 'rate');
   assert.ok(store.data.pause.until - Date.now() <= TIMINGS.rateLimitMax);
   assert.match(message(gladys).en, /slow down/);
-  await assert.rejects(async () => {
-    const ack = await press(gladys, 'refresh');
-    if (!ack.success) {
-      throw new Error(ack.error);
-    }
-  }, /slow down|ralentir/);
+  const ack = await press(gladys, 'refresh');
+  assert.equal(ack.success, false);
+  assert.match(ack.error, /ralentir/);
+});
+
+test('a 403 page without the JSON envelope (WAF) is a passing error, not a refused token', async (t) => {
+  const { server, advance } = await setup(t);
+  server.queue.push({
+    match: (r) => r.path === 'vehicle/status',
+    status: 403,
+    raw: '<html>Forbidden</html>',
+  });
+  await advance(3 * HOUR + MINUTE, 60_000);
+  assert.equal(server.logins().length, 1, 'no new sign-in');
 });
 
 test('every command is off by default: refused at once, nothing sent', async (t) => {
@@ -302,6 +323,7 @@ test('lock: answered at once, then a fresh read, one command, the result and a r
   const wakes = server.wakes().length;
   const ack = await press(gladys, 'lock');
   assert.equal(ack.success, true);
+  await settle();
   assert.match(String(last(gladys, 'command-status')), /relecture/);
   const busy = await press(gladys, 'lock');
   assert.equal(busy.success, false, 'one at a time');
@@ -321,6 +343,61 @@ test('lock: answered at once, then a fresh read, one command, the result and a r
   assert.match(String(last(gladys, 'command-status')), /non envoyé : déjà verrouillée/);
 });
 
+test('a stale state refuses the command; an undated one is never "already done"', async (t) => {
+  const server = fakeSaic();
+  const { gladys, advance } = await setup(t, { server, config: { ...CONFIG, allow_lock: true } });
+  server.reportAge = 20 * MINUTE;
+  await press(gladys, 'lock');
+  await advance(15_000);
+  assert.equal(server.commands().length, 0);
+  assert.match(String(last(gladys, 'command-status')), /état périmé \(relevé de \d\d:\d\d\)/);
+  server.reportAge = null;
+  await advance(2 * MINUTE);
+  await press(gladys, 'lock');
+  await advance(15_000);
+  assert.equal(
+    server.commands().filter((c) => c.eventId === '0').length,
+    1,
+    'locked but undated: sent, not "already locked"',
+  );
+});
+
+test('a scene pressing Lock every 2 minutes: 6 wake-ups per hour, then refused at once', async (t) => {
+  const { gladys, server, advance } = await setup(t, { config: { ...CONFIG, allow_lock: true } });
+  const wakes = server.wakes().length;
+  const acks = [];
+  for (let i = 0; i < 8; i += 1) {
+    acks.push(await press(gladys, 'lock'));
+    await advance(2 * MINUTE, 10_000);
+  }
+  assert.deepEqual(
+    acks.map((a) => a.success),
+    [true, true, true, true, true, true, false, false],
+  );
+  assert.match(acks[6].error, /6 réveils/);
+  const tooSoon = await press(gladys, 'lock');
+  await advance(MINUTE, 10_000);
+  const again = await press(gladys, 'lock');
+  assert.ok(!tooSoon.success || !again.success, 'never two clicks 1 minute apart');
+  assert.ok(server.wakes().length - wakes <= 7 + 2, 'the reads stay within the budget');
+});
+
+test('a silent car is left asleep: the buttons are refused until its next read', async (t) => {
+  const { gladys, server, advance } = await setup(t, { config: { ...CONFIG, allow_lock: true } });
+  server.asleep.add(VIN);
+  assert.equal((await press(gladys, 'refresh')).success, true);
+  await advance(40_000);
+  assert.match(String(last(gladys, 'command-status')), /Actualisation impossible/);
+  const wakes = server.wakes().length;
+  await advance(3 * MINUTE, 10_000);
+  for (const role of ['refresh', 'lock']) {
+    const ack = await press(gladys, role);
+    assert.equal(ack.success, false, role);
+    assert.match(ack.error, /laissée endormie/);
+  }
+  assert.equal(server.wakes().length, wakes);
+});
+
 test('unlock and boot: only behind their own option; decided on the read, never on memory', async (t) => {
   const server = fakeSaic();
   const { gladys, advance } = await setup(t, {
@@ -338,20 +415,24 @@ test('unlock and boot: only behind their own option; decided on the read, never 
   // A read that fails: not sent either.
   server.statuses[VIN] = vehicleStatus({ lockStatus: 1 });
   server.asleep.add(VIN);
+  await advance(2 * MINUTE);
   await press(gladys, 'unlock');
   await advance(40_000);
   assert.equal(server.commands().length, 0);
   assert.match(String(last(gladys, 'command-status')), /pas pu être relue/);
   server.asleep.delete(VIN);
-  await press(gladys, 'unlock');
+  await advance(3 * HOUR + MINUTE, 60_000);
+  const ack = await press(gladys, 'unlock');
+  assert.equal(ack.success, true, ack.error);
   await advance(15_000);
   const [unlock] = server.commands();
+  assert.ok(unlock, String(last(gladys, 'command-status')));
   assert.equal(unlock.json.rvcReqType, '2');
   assert.equal(Buffer.from(unlock.json.rvcParams[3].paramValue, 'base64')[0], 3, 'the doors');
   assert.equal(last(gladys, 'lock-state'), 0);
 });
 
-test('climate and charge: off by default, then sent on the state read; not plugged refused', async (t) => {
+test('climate and charge: sent on the state read; not plugged refused', async (t) => {
   const { gladys, server, advance } = await setup(t, {
     config: { ...CONFIG, allow_climate: true, allow_charging: true },
   });
@@ -359,6 +440,8 @@ test('climate and charge: off by default, then sent on the state read; not plugg
   await advance(15_000);
   assert.equal(server.commands().filter((c) => c.eventId === '0').length, 1);
   assert.equal(last(gladys, 'climate-on'), 1);
+  assert.match(String(last(gladys, 'command-status')), /confirmé par MG/);
+  await advance(2 * MINUTE);
   await press(gladys, 'charge-start');
   await advance(20_000);
   assert.equal(
@@ -368,13 +451,27 @@ test('climate and charge: off by default, then sent on the state read; not plugg
   );
   assert.match(String(last(gladys, 'command-status')), /pas branchée/);
   server.chargings[VIN] = chargingData({ charging: false, gun: 1 });
-  await advance(TIMINGS.refreshAfterCommand, 10_000);
+  await advance(TIMINGS.refreshAfterCommand + MINUTE, 10_000);
   await press(gladys, 'charge-start');
   await advance(20_000);
   const sent = server.commands().filter((c) => c.eventId === '0');
   assert.equal(sent.length, 2);
   assert.equal(sent[1].path, 'vehicle/charging/control');
   assert.equal(sent[1].json.chrgCtrlReq, 1);
+  const polls = server.commands().filter((c) => c.path === 'vehicle/charging/control');
+  assert.ok(polls.length >= 2);
+});
+
+test('the climate counts as on only for status 2: fan only is not "already on"', async (t) => {
+  const server = fakeSaic();
+  server.statuses[VIN] = vehicleStatus({ remoteClimateStatus: 1 });
+  const { gladys, advance } = await setup(t, {
+    server,
+    config: { ...CONFIG, allow_climate: true },
+  });
+  await press(gladys, 'climate-start');
+  await advance(15_000);
+  assert.equal(server.commands().filter((c) => c.eventId === '0').length, 1);
 });
 
 test('a command that may have left is never said "not sent"', async (t) => {
@@ -390,7 +487,86 @@ test('a command that may have left is never said "not sent"', async (t) => {
   assert.match(String(last(gladys, 'command-status')), /envoyé, sans confirmation/);
 });
 
-test('the refresh button wakes the car at most every 10 minutes; the test button never', async (t) => {
+for (const [label, json] of [
+  ['a refused token (401)', { code: 401, message: 'token expired' }],
+  ['the code 7', { code: 7, message: 'failed' }],
+]) {
+  test(`taken by the gateway, then ${label} while polling: "sent, not confirmed", never "refused"`, async (t) => {
+    const { gladys, server, advance } = await setup(t, { config: { ...CONFIG, allow_lock: true } });
+    server.statuses[VIN].basicVehicleStatus.lockStatus = 0;
+    server.queue.push({ match: (r) => r.path === 'vehicle/control' && r.eventId !== '0', json });
+    await press(gladys, 'lock');
+    await advance(15_000);
+    assert.equal(server.commands().filter((c) => c.eventId === '0').length, 1);
+    const text = String(last(gladys, 'command-status'));
+    assert.match(text, /envoyé, sans confirmation/);
+    assert.doesNotMatch(text, /refusé/);
+  });
+}
+
+test('refused on the first answer: "refused by MG"; a 429 before it: "not sent"', async (t) => {
+  const { gladys, server, advance } = await setup(t, { config: { ...CONFIG, allow_lock: true } });
+  server.statuses[VIN].basicVehicleStatus.lockStatus = 0;
+  server.queue.push({
+    match: (r) => r.path === 'vehicle/control',
+    json: { code: 7, message: 'failed' },
+  });
+  await press(gladys, 'lock');
+  await advance(15_000);
+  assert.match(String(last(gladys, 'command-status')), /refusé par MG \(.*code 7/);
+  await advance(2 * MINUTE);
+  server.queue.push({ match: (r) => r.path === 'vehicle/control', status: 429 });
+  await press(gladys, 'lock');
+  await advance(15_000);
+  assert.match(String(last(gladys, 'command-status')), /non envoyé/);
+});
+
+test('the answer of a command: a car failure, or a state that does not match', async (t) => {
+  const { gladys, server, advance } = await setup(t, { config: { ...CONFIG, allow_lock: true } });
+  server.statuses[VIN].basicVehicleStatus.lockStatus = 0;
+  server.failureType = 3;
+  await press(gladys, 'lock');
+  await advance(15_000);
+  assert.match(String(last(gladys, 'command-status')), /échec signalé par la voiture \(3/);
+  server.failureType = 0;
+  server.statuses[VIN].basicVehicleStatus.lockStatus = 0;
+  server.answerOverride = { lockStatus: 0 };
+  await advance(2 * MINUTE);
+  await press(gladys, 'lock');
+  await advance(15_000);
+  assert.match(String(last(gladys, 'command-status')), /envoyé, état non confirmé/);
+});
+
+test('a command interrupted by a restart is said so', async (t) => {
+  const store = memoryStore({ pending: { [ID]: 'lock' } });
+  const { gladys } = await setup(t, { store });
+  assert.match(String(last(gladys, 'command-status')), /interrompue/);
+  assert.deepEqual(store.data.pending, {});
+});
+
+test('the short cadence needs power flowing, and stops after 12 h of charging', async (t) => {
+  const server = fakeSaic();
+  server.chargings[VIN] = chargingData({ charging: true });
+  const { app, advance } = await setup(t, { server });
+  const statusReads = () => server.wakes().filter((r) => r.path === 'vehicle/status').length;
+  await advance(11 * HOUR, 60_000);
+  assert.ok(statusReads() >= 20, `${statusReads()} reads in 11 h of charging`);
+  await advance(90 * MINUTE, 60_000);
+  const after12 = statusReads();
+  await advance(2 * HOUR, 60_000);
+  assert.equal(statusReads(), after12, 'back to the 3 h interval after 12 h');
+  const now = Date.now();
+  const unplugged = app.readEntry('0123456789abcdef', {
+    charging: true,
+    plugged: false,
+    chargePower: 2,
+  });
+  assert.equal(unplugged.next, now + 3 * HOUR);
+  const noPower = app.readEntry('0123456789abcdef', { charging: true, chargePower: 0 });
+  assert.equal(noPower.next, now + 3 * HOUR);
+});
+
+test('the refresh button: 2 minutes apart at least; the test button never wakes a car', async (t) => {
   const { gladys, server, advance } = await setup(t);
   const wakes = server.wakes().length;
   const ack = await gladys.fake.action(ACTIONS.TEST_CONNECTION);
@@ -402,7 +578,14 @@ test('the refresh button wakes the car at most every 10 minutes; the test button
   assert.match(String(last(gladys, 'command-status')), /Actualisé/);
   const again = await press(gladys, 'refresh');
   assert.equal(again.success, false);
-  assert.match(again.error, /réveille la voiture/);
+  assert.match(again.error, /2 minutes/);
+});
+
+test('an empty vehicle list keeps the cars known', async (t) => {
+  const { gladys, server, app } = await setup(t);
+  server.vehicles = [];
+  await gladys.fake.action(ACTIONS.TEST_CONNECTION);
+  assert.equal(app.vehicles.size, 1);
 });
 
 test('a restart does not wake the car again before its time, and keeps the token', async (t) => {

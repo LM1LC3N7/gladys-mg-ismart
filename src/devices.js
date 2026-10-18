@@ -2,7 +2,8 @@
 // A car -> one Gladys device and its states (pure).
 //
 // `ext:<selector>:vehicle:<id>`, the id being the first 16 hex of the SHA-256
-// of the VIN: stable, and the VIN never reaches Gladys. The features are keyed
+// of the VIN: stable and pseudonymised (the VIN is not written as is, but
+// anyone who knows it can compute the id: not anonymous). The features are keyed
 // by their role (the last part of their external id): published forever,
 // never rename them. Every vehicle gets the same full list, so a device
 // published again never loses a feature.

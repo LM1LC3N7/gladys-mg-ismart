@@ -4,7 +4,9 @@
 //   - the SAIC token and its expiry, with the account it belongs to (a hash of
 //     the e-mail), so a restart does not sign in again (a sign-in signs the
 //     MG app out);
-//   - when the token was last refused (the 24 h window of a new sign-in);
+//   - the budget of the sign-ins after a refused token (last automatic
+//     sign-in, last refusal, session_taken stops in a row);
+//   - the command in progress of each car (a restart says it was interrupted);
 //   - the end of a 429 pause (kept across restarts and account changes);
 //   - a stop after a refusal and its next try (per account);
 //   - the next read of each car (by the hash of its VIN), so a container that
@@ -65,12 +67,29 @@ export function normalizeMemory(raw, now) {
   const s = raw?.session;
   const session =
     string(s?.account, 64) && string(s?.token, 8192) && time(s?.expiresAt) > now
-      ? { account: s.account, token: s.token, expiresAt: s.expiresAt }
+      ? {
+          account: s.account,
+          token: s.token,
+          expiresAt: s.expiresAt,
+          ...(time(s.issuedAt) !== undefined && s.issuedAt <= now ? { issuedAt: s.issuedAt } : {}),
+        }
       : null;
-  const taken =
-    string(raw?.taken?.account, 64) && time(raw?.taken?.at) !== undefined && raw.taken.at <= now
-      ? { account: raw.taken.account, at: raw.taken.at }
-      : null;
+  const past = (value) => (time(value) !== undefined && value <= now ? value : 0);
+  const t = raw?.taken;
+  const taken = string(t?.account, 64)
+    ? {
+        account: t.account,
+        at: past(t.at),
+        refusedAt: past(t.refusedAt),
+        streak: Number.isInteger(t.streak) ? Math.min(Math.max(t.streak, 0), 10) : 0,
+      }
+    : null;
+  const pending = {};
+  for (const [id, role] of Object.entries(raw?.pending ?? {}).slice(0, LIMITS.vehicles)) {
+    if (/^[0-9a-f]{16}$/.test(id) && typeof role === 'string' && /^[a-z-]{1,32}$/.test(role)) {
+      pending[id] = role;
+    }
+  }
   const b = raw?.block;
   const retryAt = bounded(b?.retryAt, now);
   const block =
@@ -92,6 +111,7 @@ export function normalizeMemory(raw, now) {
       reads[id] = {
         next,
         asleep: Number.isInteger(entry.asleep) ? Math.min(Math.max(entry.asleep, 0), 10) : 0,
+        ...(past(entry.chargingSince) ? { chargingSince: entry.chargingSince } : {}),
       };
     }
   }
@@ -101,5 +121,6 @@ export function normalizeMemory(raw, now) {
     pause: until !== undefined && pause.kind === 'rate' ? { kind: 'rate', until } : null,
     block,
     reads,
+    pending,
   };
 }
