@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-18
+
 ### Added
 
 - Sign-in to the SAIC iSMART cloud (Europe) with the e-mail and the password
@@ -62,4 +64,5 @@ the notes of the version's GitHub Release.
   documentation in English and French; `LICENSE` and
   `THIRD_PARTY_NOTICES.md` shipped in the image.
 
-[Unreleased]: https://github.com/LM1LC3N7/gladys-mg-ismart/commits/main
+[Unreleased]: https://github.com/LM1LC3N7/gladys-mg-ismart/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-mg-ismart/releases/tag/v0.1.1
