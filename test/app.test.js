@@ -12,6 +12,7 @@ import { MgApp } from '../src/app.js';
 import { accountKey } from '../src/config.js';
 import { ACTIONS, TIMINGS } from '../src/constants.js';
 import { sha1Hex, sha256Hex } from '../src/crypto.js';
+import { buildDevice } from '../src/devices.js';
 import { registerHandlers } from '../src/handlers.js';
 import { readVehicle } from '../src/model.js';
 import {
@@ -44,11 +45,19 @@ const recorder = (logs) =>
 
 async function setup(
   t,
-  { config = CONFIG, store = memoryStore(), server, now = NOW, create = true, logs = [] } = {},
+  {
+    config = CONFIG,
+    store = memoryStore(),
+    server,
+    now = NOW,
+    create = true,
+    logs = [],
+    devices = [],
+  } = {},
 ) {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now });
   const saic = server ?? fakeSaic();
-  const gladys = createFakeGladys({ config });
+  const gladys = createFakeGladys({ config, devices });
   const app = new MgApp({
     gladys,
     logger: recorder(logs),
@@ -382,7 +391,7 @@ test('a scene pressing Lock every 2 minutes: 6 wake-ups per hour, then refused a
   assert.ok(server.wakes().length - wakes <= 7 + 2, 'the reads stay within the budget');
 });
 
-test('a silent car is left asleep: the buttons are refused until its next read', async (t) => {
+test('a silent car is left asleep: one click per hour, until its next read', async (t) => {
   const { gladys, server, advance } = await setup(t, { config: { ...CONFIG, allow_lock: true } });
   server.asleep.add(VIN);
   assert.equal((await press(gladys, 'refresh')).success, true);
@@ -394,8 +403,17 @@ test('a silent car is left asleep: the buttons are refused until its next read',
     const ack = await press(gladys, role);
     assert.equal(ack.success, false, role);
     assert.match(ack.error, /laissée endormie/);
+    assert.match(ack.error, /un essai par heure/);
   }
   assert.equal(server.wakes().length, wakes);
+  // An hour after the last click: one more try, which counts.
+  await advance(HOUR, 60_000);
+  const ack = await press(gladys, 'lock');
+  assert.equal(ack.success, true, ack.error);
+  await advance(40_000);
+  assert.equal(server.wakes().length, wakes + 1);
+  await advance(3 * MINUTE, 10_000);
+  assert.equal((await press(gladys, 'refresh')).success, false, 'then again one hour');
 });
 
 test('unlock and boot: only behind their own option; decided on the read, never on memory', async (t) => {
@@ -542,6 +560,17 @@ test('a command interrupted by a restart is said so', async (t) => {
   const { gladys } = await setup(t, { store });
   assert.match(String(last(gladys, 'command-status')), /interrompue/);
   assert.deepEqual(store.data.pending, {});
+});
+
+test('a command interrupted by a restart is published at once, before any Discovery', async (t) => {
+  const builder = createFakeGladys();
+  const device = buildDevice(builder, readVehicle(vehicleInfo()), { language: 'fr' });
+  const server = fakeSaic();
+  server.down = true;
+  const store = memoryStore({ pending: { [ID]: 'lock' } });
+  const { gladys } = await setup(t, { store, server, devices: [device], create: false });
+  assert.match(String(last(gladys, 'command-status')), /interrompue/);
+  assert.deepEqual(store.data.pending, {}, 'forgotten once Gladys has it');
 });
 
 test('the short cadence needs power flowing, and stops after 12 h of charging', async (t) => {

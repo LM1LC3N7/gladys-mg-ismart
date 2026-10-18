@@ -104,8 +104,9 @@ up to date at the end of every milestone.
   refresh reads it, each command reads it before acting). Per car, shared by
   the refresh and the commands: 2 minutes apart at least, 6 per hour at
   most; beyond, the press is refused at once with a clear message. While a
-  silent car is left asleep (its `asleep` spacing), every press is refused
-  until its next read; a command read that gets no answer applies the same
+  silent car is left asleep (its `asleep` spacing), one click per hour is
+  still accepted (refresh or command, counted in the budget), the others are
+  refused until its next read; a command read that gets no answer applies the same
   spacing as the polling. The budget is in memory (a restart resets it; the
   reads reserved in `/data` still hold).
 - **One session per account** (SAIC): a sign-in signs the MG app out. The

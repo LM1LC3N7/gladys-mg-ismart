@@ -67,7 +67,8 @@ l'empêcher de démarrer. Donc :
 - une voiture qui ne répond pas (30 secondes d'attente) est relue après
   l'intervalle, puis deux fois plus tard à chaque silence (jusqu'à une fois
   par jour) : jamais en boucle. Pendant ce temps, les boutons de cette
-  voiture sont refusés ;
+  voiture n'acceptent qu'**un clic par heure** (Actualiser ou une commande),
+  qui compte dans le budget de réveils ;
 - une erreur n'est jamais relue plus vite que l'intervalle ;
 - **chaque appui sur un bouton réveille la voiture** : « Actualiser
   maintenant » la relit, et chaque commande la relit avant d'agir. Les appuis

@@ -153,7 +153,8 @@ export const TIMINGS = {
   /**
    * A status or charging read is answered with an event id first, while the
    * cloud wakes the car: the same request is sent again with that event id
-   * every 3 s (1 s for a command), for 30 s at most (the reference's tenacity
+   * every 3 s (also for the charging control; 1 s for the other commands),
+   * for 30 s at most (the reference's tenacity
    * policy). Past 30 s the car did not answer: the read fails, and is never
    * tried again sooner than the interval.
    */
@@ -174,7 +175,10 @@ export const TIMINGS = {
   asleepMax: 24 * HOUR,
   /** The vehicle list (does not wake the car): at start, then every 24 h. */
   vehicleListInterval: 24 * HOUR,
-  /** A token is renewed by a new sign-in when it expires within 10 minutes. */
+  /**
+   * A token is renewed by a new sign-in when it expires within min(10
+   * minutes, half its lifetime).
+   */
   tokenMargin: 10 * MINUTE,
   /** A token without a lifetime is kept 12 hours. */
   tokenDefaultLifetime: 12 * HOUR,

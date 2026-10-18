@@ -237,10 +237,10 @@ export const ERRORS = {
       `6 wake-ups of this car in the last hour already (refresh and commands): to spare its 12 V battery, try again in ${wait.en}.`,
       `Déjà 6 réveils de cette voiture dans l'heure (actualisations et commandes) : pour ménager sa batterie 12 V, réessayez dans ${wait.fr}.`,
     ),
-  asleep: (time) =>
+  asleep: (time, wait) =>
     both(
-      `The car did not answer its last read: it is left asleep until ${time} (12 V battery).`,
-      `La voiture n'a pas répondu à sa dernière lecture : elle est laissée endormie jusqu'à ${time} (batterie 12 V).`,
+      `The car did not answer its last read: it is left asleep until ${time} (12 V battery), with one try per hour by a click. Try again in ${wait.en}.`,
+      `La voiture n'a pas répondu à sa dernière lecture : elle est laissée endormie jusqu'à ${time} (batterie 12 V), avec un essai par heure par un clic. Réessayez dans ${wait.fr}.`,
     ),
   unknownVehicle: both('Unknown vehicle.', 'Véhicule inconnu.'),
 };

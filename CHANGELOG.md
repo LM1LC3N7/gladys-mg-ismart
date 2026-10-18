@@ -51,6 +51,10 @@ the notes of the version's GitHub Release.
   envelope is a passing error; an empty vehicle list keeps the cars known;
   charging status 11 counts as charging; the climate counts as on only for
   status 2; the car ids are documented as pseudonymised.
+- A command interrupted by a restart is published at once (forgotten in
+  `/data` only once sent to Gladys); a car left asleep accepts one click per
+  hour (refresh or command) instead of none; a command cancelled right
+  before sending says why (not connected, or option turned off).
 - Resilience: a refused password stops with one new try after 6 h, then every
   24 h; 429 pauses every path (1 minute to 6 hours), kept in `/data`; network
   and 5xx errors wait the interval.

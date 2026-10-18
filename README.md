@@ -48,7 +48,8 @@ Gladys ⇄ SDK ⇄ src/handlers.js ⇄ src/app.js (MgApp)
   command; each behind its own option (`allow_lock`, `allow_unlock`,
   `allow_tailgate`, `allow_climate`, `allow_charging`), all off by default.
   Each press wakes the car (refresh, or the read before a command): 2 min
-  apart, 6 per hour per car at most, none while a silent car is left asleep.
+  apart, 6 per hour per car at most, one per hour while a silent car is left
+  asleep.
   Gladys is answered at once; the command then reads the car again, refuses
   a report older than 10 min, decides on that fresh state only, checks its
   option again, is sent once (polled with its event id, never re-sent), and

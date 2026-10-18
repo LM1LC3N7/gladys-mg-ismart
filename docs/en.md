@@ -63,7 +63,8 @@ starts. So:
   normal interval;
 - a car that does not answer (30 seconds of waiting) is read again after the
   interval, then twice later after each silence (up to once a day): never in
-  a loop. Meanwhile, the buttons of that car are refused;
+  a loop. Meanwhile, the buttons of that car accept **one click per hour**
+  (refresh or a command), which counts in the wake-up budget;
 - an error is never read again sooner than the interval;
 - **each button press wakes the car up**: "Refresh now" reads it, and each
   command reads it before acting. Presses are limited per car: **2 minutes

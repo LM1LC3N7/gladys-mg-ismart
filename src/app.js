@@ -135,14 +135,26 @@ export class MgApp {
     const session = this.memory.session?.account === account ? this.memory.session : null;
     const taken = this.memory.taken?.account === account ? this.memory.taken : null;
     this.client.configure({ email, password, session, taken });
-    // A command that was running when the container stopped: say so, its
-    // outcome is unknown.
-    for (const id of Object.keys(this.memory.pending)) {
-      this.results.set(id, RESULTS.interrupted);
-    }
-    if (Object.keys(this.memory.pending).length > 0) {
-      this.memory.pending = {};
-      await this.saveMemory();
+    // A command that was running when the container stopped: say so at once,
+    // its outcome is unknown. /data forgets it only once Gladys has it.
+    const interrupted = Object.keys(this.memory.pending);
+    if (interrupted.length > 0) {
+      for (const id of interrupted) {
+        this.results.set(id, RESULTS.interrupted);
+        this.queueStates(id);
+      }
+      try {
+        await this.publisher.flush();
+        const left = [...this.publisher.pending.keys()].some((key) =>
+          interrupted.some((id) => key.startsWith(`${vehicleIds(this.gladys, id).device}:`)),
+        );
+        if (!left) {
+          this.memory.pending = {};
+          await this.saveMemory();
+        }
+      } catch (err) {
+        this.logger.warn(`Sending to Gladys failed: ${err.message}`);
+      }
     }
     const block = this.memory.block?.account === account ? this.memory.block : null;
     this.block = block
@@ -778,11 +790,13 @@ export class MgApp {
   wakeRefusal(id) {
     const now = this.now();
     const entry = this.memory.reads[id];
-    if (entry?.asleep > 0 && now < entry.next) {
-      return ERRORS.asleep(this.time(entry.next));
-    }
     const wakes = (this.wakes.get(id) ?? []).filter((t) => now - t < HOUR);
     this.wakes.set(id, wakes);
+    // A silent car left asleep: one click per hour still tries (it counts in
+    // the budget), never more.
+    if (entry?.asleep > 0 && now < entry.next && wakes.length > 0) {
+      return ERRORS.asleep(this.time(entry.next), age(wakes[0] + HOUR - now));
+    }
     const last = wakes.at(-1);
     if (last !== undefined && now - last < TIMINGS.manualGap) {
       return ERRORS.tooSoon(age(last + TIMINGS.manualGap - now));
@@ -988,13 +1002,21 @@ export class MgApp {
     }
     this.logger.info(`MG iSMART: sending ${name.en} to ${vehicle.name}`);
     let accepted = false;
+    let cancelled;
     try {
       const data = await this.client.command(vehicle.vin, role, {
         onAccepted: () => {
           accepted = true;
         },
         // Checked again right before the first request leaves.
-        guard: () => !stale() && (!option || Boolean(this.config[option])),
+        guard: () => {
+          if (stale()) {
+            cancelled = WHY.notConnected;
+          } else if (option && !this.config[option]) {
+            cancelled = WHY.disabled;
+          }
+          return cancelled === undefined;
+        },
       });
       const { text, after } = this.outcome(role, name, data);
       await this.result(id, text);
@@ -1011,7 +1033,8 @@ export class MgApp {
         // Taken by the gateway: it may have been executed, whatever came next.
         await this.result(id, RESULTS.unconfirmed(name, reason, this.time()));
       } else if (err.kind === 'cancelled') {
-        await notSent(WHY.disabled);
+        // The guard says why: no longer connected, or the option turned off.
+        await notSent(cancelled ?? WHY.disabled);
       } else if (err.kind === 'api' || err.kind === 'logged_out') {
         await this.result(id, RESULTS.refusedByMg(name, reason, this.time()));
       } else if (err.notSent || NOT_SENT.has(err.kind)) {

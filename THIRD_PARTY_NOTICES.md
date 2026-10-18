@@ -46,8 +46,8 @@ Ported in `src/constants.js`, `src/crypto.js`, `src/client.js` and
 - `api/base.py`: the sign-in (`oauth/token`, the app's OAuth client, the
   SHA-1 of the password, the simulator device id), the `blade-auth` token,
   the answer envelope (`code`, `data`, codes 2/3/7, 401/403) and the event-id
-  polling of the slow calls (every 3 s for a read, 1 s for a command, 30 s at
-  most);
+  polling of the slow calls (every 3 s for a read and for the charging
+  control, 1 s for the other commands, 30 s at most);
 - `api/vehicle`, `api/vehicle/locks`, `api/vehicle/climate`,
   `api/vehicle_charging`: `vehicle/list`, `vehicle/status`
   (`vehStatusReqType` 2), `vehicle/charging/mgmtData`, `vehicle/control`
