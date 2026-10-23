@@ -1,6 +1,6 @@
 {
   "name": "gladys-mg-ismart",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "MG cars (MG4, ZS EV, MG5, Marvel R…) for Gladys Assistant through the SAIC iSMART cloud (Europe): battery, range, charge, odometer, locks, doors, boot, position, cabin temperature, climate; lock, unlock, boot, climate and charge buttons behind off-by-default options.",
   "type": "module",
